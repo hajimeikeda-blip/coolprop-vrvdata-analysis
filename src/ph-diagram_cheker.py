@@ -142,9 +142,6 @@ with col2:
 
     try:
         # スライダーで選ばれた時刻のデータを使用して計算
-        # ※ お手元のデータカラム名に合わせて適宜調整してください
-        # ここでは提供された関数の引数に基づき、current_rowから値を抽出
- 
         T_evap_C = current_row['teg']
         T_cond_C = current_row['tcg']
         T_dis_C = current_row['compressor_1_dischargetemp']
@@ -166,22 +163,36 @@ with col2:
         
         P_evap_MPa = P_evap_Pa / 1e6
         P_cond_MPa = P_cond_Pa / 1e6
-        
+
+        # R410Aなどの非共沸冷媒は、Q=0.5などでCoolPropに入力するとエラーになる
+        # P_doubleHX_Pa = CP.PropsSI('P','T', T_doubleHX_C + 273.15,'Q',0.5,fluid)
+        # P_doubleHX_Pa = CP.PropsSI('P','T', T_doubleHX_C + 273.15,'Q',1.0,fluid)
+        # P_doubleHX_MPa = P_doubleHX_Pa / 1e6
+
+
         def get_h(T_C, P_Pa, fluid):
             T_K = T_C + 273.15
-            # その圧力での飽和温度を取得
-            # T_sat_L = CP.PropsSI('T', 'P', P_Pa, 'Q', 0, fluid)
-            # T_sat_V = CP.PropsSI('T', 'P', P_Pa, 'Q', 1, fluid)
     
-            return CP.PropsSI('H', 'T', T_K, 'P', P_Pa, fluid) / 1000.0
+            try:
+                # 指定したT, Pで直接計算を試みる（単相域：過冷却液 or 過熱蒸気）
+                return CP.PropsSI('H', 'T', T_K, 'P', P_Pa, fluid) / 1000.0
+            
+            except ValueError:
+                # T, Pが飽和域にある場合、あるいは境界上の場合はエラーになるため
+                # 飽和蒸気の値を返すなどの例外処理が必要
+                print("Warning: State is in the saturation region or input is invalid.")
+                return None
 
         h_inlet = get_h(T_accum_in_C, P_evap_Pa,fluid_name)       # Inlet (Accumu In)
         h_dis = get_h(T_dis_C, P_cond_Pa,fluid_name)             # Discharge
         h_cond_out = get_h(T_cond_out_C, P_cond_Pa,fluid_name)   # Condenser Out
-        h_cond_airout = get_h(T_airout_C, P_cond_Pa,fluid_name)  # Condenser (Air outdoorunit)
+        h_airout = get_h(T_airout_C, P_cond_Pa,fluid_name)  # Condenser (Air outdoorunit) 外気温度
         h_cond_liquid = get_h(T_liquidpipe_C, P_cond_Pa,fluid_name) # Condenser Liquid pipe
-        h_cond_doubleHX = get_h(T_doubleHX_C, P_cond_Pa,fluid_name) # Condenser DoubleHX
-        h_evap_indoor_gas = get_h(T_indoor_gas_C, P_evap_Pa,fluid_name) # Condenser DoubleHX
+        
+        h_doubleHX_in = h_cond_out  # 二重管入口　凝縮器出口のエンタルピーは同じ
+        h_doubleHX_out = get_h(T_doubleHX_C,P_evap_Pa,fluid_name) # DoubleHX out 　二重管出口のエンタルピーは過冷却管温度から算出する
+        
+        h_evap_indoor_gas = get_h(T_indoor_gas_C, P_evap_Pa,fluid_name) # 室内ガスガス管
         # 飽和線の交点（補助用）
         h_cond_gas = CP.PropsSI('H', 'P', P_cond_Pa, 'Q', 1, fluid_name) / 1000.0
         h_cond_liquid_sat = CP.PropsSI('H', 'P', P_cond_Pa, 'Q', 0, fluid_name) / 1000.0
@@ -189,17 +200,19 @@ with col2:
        
         # --- 3. プロット (Points) ---
         pts = [
-            (h_inlet, P_evap_MPa, 'bo', "Inlet(Accumu In)"),
+            (h_inlet, P_evap_MPa, 'bs', "Inlet(Accumu In)"),
             (h_evap_indoor_gas, P_evap_MPa, 'bo', "Evaporator Gas"),
-            (h_dis, P_cond_MPa, 'ro', "Discharge"),
-            (h_cond_out, P_cond_MPa, 'go', "Condenser Out"),
+            (h_dis, P_cond_MPa, 'rs', "Discharge"),
+            (h_cond_out, P_cond_MPa, 'gs', "Condenser Out"),
             (h_cond_gas, P_cond_MPa, 'gx', "Condenser Gas"),
-            (h_cond_liquid, P_cond_MPa, 'bo', "Condenser Liquid pipe"),
-            (h_cond_doubleHX, P_cond_MPa, 'bo', "Condenser DoubleHX"),
-            (h_cond_airout, P_cond_MPa, 'mo', "Condenser (Air out)"),
-            (h_cond_airout, P_evap_MPa, '.', "Evaporator In")
+            (h_cond_liquid, P_cond_MPa, 'bs', "Condenser Liquid pipe"),
+            (h_doubleHX_in, P_evap_MPa, 'go', "DoubleHX in (EVT out)"),
+            (h_doubleHX_out, P_evap_MPa, 'go', "DoubleHX out "),
+            (h_airout, P_cond_MPa, 'm.', "Outdoor Unit (Air out)"), # 外気温度 
+            (h_cond_out, P_evap_MPa, '.', "Evaporator In")
         ]
 
+        st.write('DoubleHX out Enthalpy=',h_doubleHX_out,'Enthalpy (Evap gas)=',h_evap_indoor_gas)
         st.write('SC: T_cg - T_liquidpipe_cg',T_cond_C - T_liquidpipe_C)
         st.write('SH (evap): T_indoor_gas - T_eg',T_indoor_gas_C - T_evap_C)
         st.write('SH (doubleHX):T_doubleHX - T_eg',T_doubleHX_C - T_evap_C)
@@ -215,18 +228,19 @@ with col2:
         plt.plot([h_dis, h_cond_out], [P_cond_MPa, P_cond_MPa], 'g-', lw=2)
     
         # サブクール・液管・二重管ライン
-        plt.plot([h_cond_out, h_cond_airout], [P_cond_MPa, P_cond_MPa], 'b-', lw=1.5)
-        plt.plot([h_cond_airout, h_cond_liquid], [P_cond_MPa, P_cond_MPa], 'b-', lw=1.5)
-        plt.plot([h_cond_airout, h_cond_doubleHX], [P_cond_MPa, P_cond_MPa], 'b-', lw=1.5)
+        #plt.plot([h_cond_out, h_cond_airout], [P_cond_MPa, P_cond_MPa], 'b-', lw=1.5)
+        #plt.plot([h_cond_airout, h_cond_liquid], [P_cond_MPa, P_cond_MPa], 'b-', lw=1.5)
+        #plt.plot([h_cond_airout, h_doubleHX_in], [P_cond_MPa, P_cond_MPa], 'b-', lw=1.5)
     
         # 蒸発器ライン (膨張弁通過後の等エンタルピ想定)
-        # ここでは h_cond_airout を基準点として蒸発器入口へつなぐ
-        plt.plot([h_cond_airout, h_inlet], [P_evap_MPa, P_evap_MPa], 'b:', lw=2, label="Evaporator line")
+        # ここでは h_cond_out を基準点として蒸発器入口へつなぐ
+        plt.plot([h_cond_out, h_inlet], [P_evap_MPa, P_evap_MPa], 'b:', lw=2, label="Evaporator line")
 
         # 膨張弁 (等エンタルピ)
-        plt.plot([h_cond_airout, h_cond_airout], [P_cond_MPa, P_evap_MPa], 'k--', lw=1)
+        plt.plot([h_cond_out, h_cond_out], [P_cond_MPa, P_evap_MPa], 'k--', lw=1)
 
-
+        # 二重管熱交換器のライン
+        plt.plot([h_cond_out, h_doubleHX_out], [P_evap_MPa, P_evap_MPa], 'b--', lw=1)
         
         ax.set_yscale('log')
         ax.set_xlim(100, 600)
@@ -234,8 +248,11 @@ with col2:
         ax.set_xlabel('Enthalpy [kJ/kg]')
         ax.set_ylabel('Pressure [MPa]')
         ax.grid(True, which="both", alpha=0.3)
-        ax.legend()
-        
+        #ax.legend()
+
+        # ax.legend(loc='best', borderaxespad=0, fontsize='small')
+        ax.legend(loc='upper left', fontsize='small') 
+
     except Exception as e:
         st.warning(f"この時刻の物性計算ができませんでした: {e}")
 
