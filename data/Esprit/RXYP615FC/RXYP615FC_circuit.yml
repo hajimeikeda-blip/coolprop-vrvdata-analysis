@@ -1,0 +1,58 @@
+model_name: RXYP615FC
+nodes:
+  Inlet:
+    temp: 吸入管温度
+    press_ref: 圧縮機入口圧力_MPa(算出) 
+    label: 吸入点
+    style: bs
+  Discharge:
+    temp: 吐出管温度
+    press_ref: 高圧入口圧力 
+    label: 吐出点
+    style: rs
+  Cond_Out:
+    temp: 凝縮器出口温度
+    press_ref: 高圧入口圧力
+    label: 凝縮器出口温度
+    style: rs
+  subcoolHEX_HighPres:
+    temp: 二重管高圧出口温度
+    press_ref:  バイパス入口圧力(減圧後)
+    label: 二重管高圧出口温度
+    style: ys
+  subcoolHEX_LowPres:
+    temp: 二重管低圧出口温度
+    press_ref: バイパス入口圧力(減圧後)
+    label: 二重管低圧出口温度
+    style: ys
+  Indoor_GasPipe:
+    temp: 室内熱交ガス管温度(Evap出口)
+    press_ref: 圧縮機入口圧力_MPa(算出)
+    label: 室内熱交ガス管温度(Evap出口)
+    style: ys
+  Indoor_LiquidPipe:
+    temp: 室内熱交液管温度(Evap入口)
+    press_ref: 圧縮機入口圧力_MPa(算出)
+    label: 室内熱交液管温度(Evap入口)
+    style: ys
+connections:
+  - start: Inlet
+    end: Discharge
+    color: red
+    style: "-"
+    label: 圧縮工程
+  - start: Discharge
+    end: Cond_Out
+    color: yellow
+    style: "-"
+    label: 凝縮工程
+  - start: Cond_Out
+    end: Indoor_LiquidPipe
+    color: green
+    style: "--"
+    label: 膨張弁工程
+  - start: Indoor_LiquidPipe
+    end: Indoor_GasPipe
+    color: blue
+    style: "-"
+    label: 蒸発工程
