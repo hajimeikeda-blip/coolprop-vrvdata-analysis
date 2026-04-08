@@ -5,10 +5,11 @@ PH線図生成スクリプト: RXYP335FC (GAUSS連携データ)
 - Plotlyを使ったアニメーション付きインタラクティブHTMLを出力
 
 レイアウト:
-  左列 row1: 温度時系列
-  左列 row2: 圧縮機回転数 (RPS)
-  左列 row3: EV開度
-  右列 row1-3 (rowspan): P-h 線図
+  左列 row1: 温度時系列         (高め)
+  左列 row2: 圧縮機回転数 (RPS) (低め)
+  左列 row3: EV開度 (EVM%等)    (低め)
+  左列 row4: FanSt              (低め)
+  右列 row1-4 (rowspan): P-h 線図
   ※ secondary_y は使わない（アニメーション時にフリッカーするため）
 """
 
@@ -33,8 +34,8 @@ OUTPUT_HTML = os.path.join(BASE_DIR, "ph_interactive_Gauss_335FC.html")
 
 FLUID = "R410A"
 
-# 3行×2列レイアウトの軸参照（非None セルの順に連番）
-# (1,1)→x/y, (1,2 rowspan)→x2/y2, (2,1)→x3/y3, (3,1)→x4/y4
+# 4行×2列レイアウトの軸参照（非None セルの順に連番）
+# (1,1)→x/y, (1,2 rowspan)→x2/y2, (2,1)→x3/y3, (3,1)→x4/y4, (4,1)→x5/y5
 PH_XREF = "x2"
 PH_YREF = "y2"
 
@@ -215,19 +216,20 @@ def main():
     print(f"  Animation frames: {len(df_plot)}")
 
     # ── サブプロット構成 ──
-    # 左列 3行（温度 / RPS / EV開度）、右列 rowspan=3（PH線図）
+    # 左列 4行（温度(大) / RPS(小) / EV開度(小) / FanSt(小)）、右列 rowspan=4（PH線図）
     # secondary_y を一切使わないことでアニメーション時のフリッカーを防止
     fig = make_subplots(
-        rows=3, cols=2,
+        rows=4, cols=2,
         column_widths=[0.55, 0.45],
-        row_heights=[0.45, 0.275, 0.275],
+        row_heights=[0.40, 0.20, 0.20, 0.20],
         specs=[
-            [{"type": "xy"}, {"rowspan": 3, "type": "xy"}],
+            [{"type": "xy"}, {"rowspan": 4, "type": "xy"}],
+            [{"type": "xy"}, None],
             [{"type": "xy"}, None],
             [{"type": "xy"}, None],
         ],
-        subplot_titles=("Temperatures", "P-h Diagram", "Compressor RPS", "", "EV Openings", ""),
-        vertical_spacing=0.07,
+        subplot_titles=("Temperatures", "P-h Diagram", "Compressor RPS", "", "EV Openings", "", "Fan Status", ""),
+        vertical_spacing=0.05,
         horizontal_spacing=0.10,
     )
 
@@ -268,17 +270,30 @@ def main():
                 row=3, col=1,
             )
 
+    # ── 静的トレース: FanSt / 制御ﾓｰﾄﾞ（row=4, col=1 → xaxis='x5', yaxis='y5'）──
+    for col_name, color in [("FanSt", "purple"), ("制御ﾓｰﾄﾞ", "orange"), ("外ｻｰﾓON中", "steelblue")]:
+        if col_name in df.columns:
+            fig.add_trace(
+                go.Scatter(x=df.index, y=df[col_name],
+                           name=rename_dict.get(col_name, col_name),
+                           mode="lines",
+                           line=dict(color=color)),
+                row=4, col=1,
+            )
+
     # ── 静的トレース: PH線図背景（row=1, col=2）──
     add_ph_background(fig, FLUID, row=1, col=2, xref=PH_XREF, yref=PH_YREF)
 
-    # 左列3行のx軸を連動させる（ズーム・パンが同期）
+    # 左列4行のx軸を連動させる（ズーム・パンが同期）
     fig.update_xaxes(matches="x", row=2, col=1)
     fig.update_xaxes(matches="x", row=3, col=1)
+    fig.update_xaxes(matches="x", row=4, col=1)
 
     # 軸ラベル
-    fig.update_yaxes(title_text="Temp [℃]",       row=1, col=1)
-    fig.update_yaxes(title_text="Speed [rps]",     row=2, col=1)
+    fig.update_yaxes(title_text="Temp [℃]",         row=1, col=1)
+    fig.update_yaxes(title_text="Speed [rps]",       row=2, col=1)
     fig.update_yaxes(title_text="EV ratio [%/step]", row=3, col=1)
+    fig.update_yaxes(title_text="Fan Status",        row=4, col=1)
 
     bg_trace_count = len(fig.data)
     print(f"  Background traces: {bg_trace_count}")
@@ -289,12 +304,16 @@ def main():
     moving_data_len = 0
 
     # カーソル線のY範囲
-    temp_vals = df[temp_cols].dropna()
+    temp_cols_present = [c for c in temp_cols if c in df.columns]
+    temp_vals = df[temp_cols_present].dropna()
     y1_min = temp_vals.min().min() - 5
     y1_max = temp_vals.max().max() + 5
     y2_max = df[rps_col].max() + 10 if rps_col in df.columns else 100
     ev_cols_present = [ev["col"] for ev in ev_configs if ev["col"] in df.columns]
     y3_max = df[ev_cols_present].max().max() + 0.2 if ev_cols_present else 1.5
+    fan_cols = [c for c in ["FanSt", "制御ﾓｰﾄﾞ", "外ｻｰﾓON中"] if c in df.columns]
+    y4_min = df[fan_cols].min().min() - 1 if fan_cols else 0
+    y4_max = df[fan_cols].max().max() + 1 if fan_cols else 5
 
     for _, row in df_plot.iterrows():
         row_dict = row.to_dict()
@@ -304,7 +323,38 @@ def main():
         ph_traces = build_cycle_traces(row_dict, circuit_dict, FLUID,
                                        xaxis=PH_XREF, yaxis=PH_YREF)
 
-        # 時系列カーソル線（左列3行それぞれ）
+        # PH線図内の情報テキスト
+        def fmt(v):
+            return f"{v:.1f}" if v is not None and not pd.isna(v) else "N/A"
+
+        rps_val   = row_dict.get("rps1")
+        sc_val    = (row_dict.get("Tcg") - row_dict.get("Tf")
+                     if row_dict.get("Tcg") is not None and row_dict.get("Tf") is not None
+                     else None)
+        sh_sc_val = (row_dict.get("Tsh") - row_dict.get("Tm")
+                     if row_dict.get("Tsh") is not None and row_dict.get("Tm") is not None
+                     else None)
+        sh_in_val = (row_dict.get("In1_TH3") - row_dict.get("Teg")
+                     if row_dict.get("In1_TH3") is not None and row_dict.get("Teg") is not None
+                     else None)
+
+        info_text = (
+            f"<b>圧縮機回転数</b>: {fmt(rps_val)} rps<br>"
+            f"<b>SC</b> = Tcg − Tf: {fmt(sc_val)} ℃<br>"
+            f"<b>SH(過冷却)</b> = Tsh − Tm: {fmt(sh_sc_val)} ℃<br>"
+            f"<b>SH(室内熱交)</b> = In1_TH3 − Teg: {fmt(sh_in_val)} ℃"
+        )
+        info_trace = go.Scatter(
+            x=[5], y=[4.5],
+            mode="text",
+            text=[info_text],
+            textposition="bottom right",
+            textfont=dict(size=13, color="darkblue"),
+            xaxis=PH_XREF, yaxis=PH_YREF,
+            showlegend=False, hoverinfo="skip",
+        )
+
+        # 時系列カーソル線（左列4行それぞれ）
         cursor_temp = go.Scatter(
             x=[ts, ts], y=[y1_min, y1_max],
             mode="lines",
@@ -326,8 +376,15 @@ def main():
             xaxis="x4", yaxis="y4",
             showlegend=False, hoverinfo="skip",
         )
+        cursor_fan = go.Scatter(
+            x=[ts, ts], y=[y4_min, y4_max],
+            mode="lines",
+            line=dict(color="rgba(0,0,0,0.4)", width=1, dash="dash"),
+            xaxis="x5", yaxis="y5",
+            showlegend=False, hoverinfo="skip",
+        )
 
-        moving_data = [cursor_temp, cursor_rps, cursor_ev] + ph_traces
+        moving_data = [cursor_temp, cursor_rps, cursor_ev, cursor_fan, info_trace] + ph_traces
         moving_data_len = len(moving_data)
 
         frames.append(
@@ -363,12 +420,12 @@ def main():
     # ── レイアウト ──
     fig.update_layout(
         sliders=sliders,
-        height=900,
+        height=1000,
         title_text="RXYP335FC (GAUSS連携) P-h Diagram Analysis（年月日はダミー）",
         template="plotly_white",
         showlegend=True,
         hovermode="closest",
-        xaxis2=dict(range=[100, 600], title="Enthalpy [kJ/kg]"),
+        xaxis2=dict(range=[0, 600], title="Enthalpy [kJ/kg]"),
         yaxis2=dict(type="log", range=[np.log10(0.3), np.log10(5.0)], title="Pressure [MPa]"),
     )
 
