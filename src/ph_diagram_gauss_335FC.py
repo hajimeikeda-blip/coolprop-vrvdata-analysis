@@ -5,17 +5,20 @@ PH線図生成スクリプト: RXYP335FC (GAUSS連携データ)
 - Plotlyを使ったアニメーション付きインタラクティブHTMLを出力
 
 レイアウト:
-  左列 row1: 温度時系列         (高め)
-  左列 row2: 圧縮機回転数 (RPS) (低め)
-  左列 row3: EV開度 (EVM%等)    (低め)
-  左列 row4: FanSt / 制御ﾓｰﾄﾞ / 外ｻｰﾓON中 (低め)
+  左列 row1: 温度時系列                       (高め)
+  左列 row2: 圧縮機回転数 (RPS)               (低め)
+  左列 row3: EV開度 (EVM%等)                  (低め)
+  左列 row4: EV パルス (目標パルス2000換算)   (低め)
+  左列 row5: FanSt / 制御ﾓｰﾄﾞ / 外ｻｰﾓON中   (低め)
   右列 row1-3 (rowspan=3): P-h 線図
-  右列 row4: 温度センサー大小関係バリデーション表
+  右列 row4-5 (rowspan=2): 温度センサー大小関係バリデーション表
   ※ secondary_y は使わない（アニメーション時にフリッカーするため）
 """
 
 import os
+import re
 import json
+from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -27,81 +30,156 @@ import yaml
 # パス設定
 # ─────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "data", "Gauss", "20260407_RXYP335FC")
-PARQUET_PATH = os.path.join(DATA_DIR, "Combined_RAM260407184816.parquet")
+DATA_DIR = os.path.join(BASE_DIR, "data", "Gauss", "20260409_RXYP335FC")
+PARQUET_PATH = os.path.join(DATA_DIR, "Combined_RAM260409183935.parquet")
 CIRCUIT_YAML_PATH = os.path.join(DATA_DIR, "RXYP335FC_circuit.yml")
 JAPANESE_NAMES_PATH = os.path.join(DATA_DIR, "RXYP335FC_Japanese_names.json")
-OUTPUT_HTML = os.path.join(BASE_DIR, "ph_interactive_Gauss_335FC.html")
+OUTPUT_HTML = os.path.join(BASE_DIR, "ph_interactive_Gauss_335FC_20260409.html")
 
 FLUID = "R410A"
 
-# 4行×2列レイアウトの軸参照（非None セルの順に連番）
-# (1,1)→x/y, (1,2 rowspan=3)→x2/y2, (2,1)→x3/y3, (3,1)→x4/y4, (4,1)→x5/y5, (4,2)→table
+# 5行×2列レイアウトの軸参照（非None セルの順に連番）
+# (1,1)→x/y, (1,2 rowspan=3)→x2/y2, (2,1)→x3/y3, (3,1)→x4/y4,
+# (4,1)→x5/y5, (4,2 rowspan=2)→table, (5,1)→x6/y6
 PH_XREF = "x2"
 PH_YREF = "y2"
 
 # ─────────────────────────────────────────────
 # 温度センサーバリデーション設定
 # ─────────────────────────────────────────────
-# データカラム名
-VAL_SENSORS = ["Tdi", "Tcg", "Tb", "Tf", "Tm", "Teg", "Tsh", "Ts", "Tsc", "In1_TH3", "In1_TH2"]
-# 表示用短縮名
-VAL_LABELS  = ["Tdi", "Tcg", "Tb", "Tf", "Tm", "Teg", "Tsh", "Ts", "Tsc", "Th3", "Th2"]
-
-# EXPECTED_MATRIX[i][j] = row_i センサー vs col_j センサーの期待大小関係
-# "大": row_i > col_j が期待値, "小": row_i < col_j, "保留": 未確定, "-": 同一
-EXPECTED_MATRIX = [
-    # Tdi  Tcg   Tb   Tf   Tm    Teg   Tsh   Ts    Tsc   Th3   Th2
-    ["-",  "大", "大", "大", "大", "大",  "大",  "大",  "大",  "大",  "大"],  # Tdi
-    ["小",  "-", "大", "大", "大", "大",  "大",  "大",  "大",  "大",  "大"],  # Tcg
-    ["小", "小",  "-", "大", "大", "大",  "大",  "大",  "大",  "大",  "大"],  # Tb
-    ["小", "小", "小",  "-", "大", "大",  "大",  "大",  "大",  "大",  "大"],  # Tf
-    ["小", "小", "小", "小",  "-", "保留","小",  "大",  "保留","大",  "大"],  # Tm
-    ["小", "小", "小", "小", "保留", "-", "保留","小",  "大",  "小",  "大"],  # Teg
-    ["小", "小", "小", "小", "大", "保留",  "-", "保留","小",  "保留","大"],  # Tsh
-    ["小", "小", "小", "小", "小", "大",  "保留",  "-", "保留","保留","大"],  # Ts
-    ["小", "小", "小", "小", "保留","小",  "大", "保留",  "-", "保留","大"],  # Tsc
-    ["小", "小", "小", "小", "小", "大",  "保留","保留","保留",  "-", "大"],  # Th3
-    ["小", "小", "小", "小", "小", "小",  "小",  "小",  "小",  "小",  "-"],  # Th2
-]
+EXCEL_PATH = os.path.join(DATA_DIR, "temp_relation_checker.xlsx")
 
 # 色定義
 COLOR_OK      = "#c8e6c9"  # 緑: 期待通り
 COLOR_NG      = "#ffcdd2"  # 赤: 期待と不一致
 COLOR_PENDING = "#fff9c4"  # 黄: 保留
+COLOR_EQUAL   = "#e3f2fd"  # 水色: 等値（vi == vj）
 COLOR_HEADER  = "#546e7a"  # ヘッダー背景
 COLOR_ROWLBL  = "#eceff1"  # 行ラベル背景
 COLOR_DIAG    = "#f5f5f5"  # 対角
 
 
-def compute_table_data(row_dict: dict) -> tuple[list, list]:
+def prepare_combined_parquet(data_dir: str, out_path: str) -> None:
+    """
+    Out1 / In1 / In2 / In3 の CSV を結合して Parquet を作成する。
+    ファイル名例: Out1_RAM260409183935_ForACModel_out.csv
+    Time 列フォーマット: "DD.HH:MM:SS" (経過時間)
+    ファイル名の YYMMDDHHMMSS から基準時刻を抽出して絶対 datetime に変換する。
+    """
+    # ── 基準時刻をファイル名から抽出 ──
+    out1_files = sorted(f for f in os.listdir(data_dir) if f.startswith("Out1_") and f.endswith(".csv"))
+    if not out1_files:
+        raise FileNotFoundError(f"Out1 CSV が見つかりません: {data_dir}")
+    m = re.search(r"(\d{6})(\d{6})", out1_files[0])
+    if m:
+        ymd, hms = m.group(1), m.group(2)
+        base_dt = datetime(2000 + int(ymd[:2]), int(ymd[2:4]), int(ymd[4:6]),
+                           int(hms[:2]), int(hms[2:4]), int(hms[4:6]))
+    else:
+        base_dt = datetime(2026, 1, 1)
+    print(f"  Base datetime: {base_dt}")
+
+    def parse_elapsed(series: pd.Series) -> pd.DatetimeIndex:
+        """'DD.HH:MM:SS' を絶対 datetime に変換する。"""
+        def _parse(t: str):
+            try:
+                day_s, time_s = str(t).split(".")
+                h, mn, s = time_s.split(":")
+                return base_dt + timedelta(days=int(day_s), hours=int(h),
+                                           minutes=int(mn), seconds=int(s))
+            except Exception:
+                return pd.NaT
+        return pd.DatetimeIndex(series.apply(_parse))
+
+    # ── Out1 ──
+    out1_path = os.path.join(data_dir, out1_files[0])
+    df_out = pd.read_csv(out1_path, encoding="cp932", skiprows=[0], header=0)
+    df_out.index = parse_elapsed(df_out["Time"])
+    df_out.index.name = "Time"
+    df_out = df_out.drop(columns=["Time"])
+    print(f"  Out1: {df_out.shape}")
+
+    # ── In1, In2, In3 ──
+    df_combined = df_out
+    for n in [1, 2, 3]:
+        in_files = sorted(f for f in os.listdir(data_dir)
+                          if f.startswith(f"In{n}_") and f.endswith(".csv"))
+        if not in_files:
+            print(f"  In{n}: not found, skip")
+            continue
+        in_path = os.path.join(data_dir, in_files[0])
+        df_in = pd.read_csv(in_path, encoding="cp932", skiprows=[0], header=0)
+        df_in.index = parse_elapsed(df_in["Time"])
+        df_in.index.name = "Time"
+        df_in = df_in.drop(columns=["Time"])
+        df_in.columns = [f"In{n}_{c}" for c in df_in.columns]
+        df_combined = df_combined.join(df_in, how="left")
+        print(f"  In{n}: {df_in.shape}")
+
+    df_combined.to_parquet(out_path)
+    print(f"  Saved: {out_path}  shape={df_combined.shape}")
+
+
+def load_expected_matrix(excel_path: str) -> tuple[list, list, list]:
+    """
+    Excel ファイルから期待大小関係マトリクスを読み込む。
+    戻り値: (sensors, labels, matrix)
+      sensors: データカラム名のリスト（行/列の順序）
+      labels : 表示用短縮名のリスト
+      matrix : matrix[i][j] = 期待値文字列（"大"/"小"/"保留"/"-"）
+    """
+    df = pd.read_excel(excel_path, index_col=0, header=0)
+    sensors = df.index.tolist()
+
+    # 表示用短縮名: In1_THx → Thx
+    def shorten(name: str) -> str:
+        return name.replace("In1_TH", "Th") if name.startswith("In1_TH") else name
+
+    labels = [shorten(s) for s in sensors]
+    matrix = df.values.tolist()
+    return sensors, labels, matrix
+
+
+def compute_table_data(
+    row_dict: dict,
+    sensors: list,
+    labels: list,
+    expected_matrix: list,
+) -> tuple[list, list]:
     """
     現在の行データから大小比較テーブルを計算する。
     戻り値: (col_values, col_colors) — go.Table の cells.values / cells.fill.color 形式
     各リストは列ごとのリスト（最初の列 = 行ラベル）
     """
-    n = len(VAL_SENSORS)
-    col_values = [VAL_LABELS]               # 1列目: 行ラベル
-    col_colors = [[COLOR_ROWLBL] * n]       # 1列目の色
+    n = len(sensors)
+    col_values = [labels]
+    col_colors = [[COLOR_ROWLBL] * n]
 
     for j in range(n):
         vals, colors = [], []
         for i in range(n):
-            exp = EXPECTED_MATRIX[i][j]
+            exp = expected_matrix[i][j]
             if exp == "-":
                 vals.append("—")
                 colors.append(COLOR_DIAG)
                 continue
 
-            vi = row_dict.get(VAL_SENSORS[i])
-            vj = row_dict.get(VAL_SENSORS[j])
+            vi = row_dict.get(sensors[i])
+            vj = row_dict.get(sensors[j])
 
             if vi is None or vj is None or pd.isna(vi) or pd.isna(vj):
                 vals.append("?")
                 colors.append(COLOR_DIAG)
                 continue
 
-            actual = "大" if vi > vj else "小"
+            if vi > vj:
+                actual = "大"
+            elif vi < vj:
+                actual = "小"
+            else:
+                vals.append("=")
+                colors.append(COLOR_EQUAL)
+                continue
 
             if exp == "保留":
                 vals.append(actual)
@@ -119,19 +197,19 @@ def compute_table_data(row_dict: dict) -> tuple[list, list]:
     return col_values, col_colors
 
 
-def make_initial_table() -> go.Table:
-    n = len(VAL_SENSORS)
+def make_initial_table(labels: list) -> go.Table:
+    n = len(labels)
     return go.Table(
         columnwidth=[2.2] + [1.0] * n,
         header=dict(
-            values=[""] + VAL_LABELS,
+            values=[""] + labels,
             fill_color=COLOR_HEADER,
             font=dict(size=9, color="white"),
             align="center",
             height=20,
         ),
         cells=dict(
-            values=[VAL_LABELS] + [["-"] * n] * n,
+            values=[labels] + [["-"] * n] * n,
             fill=dict(color=[[COLOR_ROWLBL] * n] + [[COLOR_DIAG] * n] * n),
             font=dict(size=9, color="black"),
             align="center",
@@ -301,7 +379,14 @@ def build_cycle_traces(row_data, config, fluid, xaxis, yaxis):
 # メイン処理
 # ─────────────────────────────────────────────
 def main():
+    # ── CSV を結合して Parquet を生成（未作成の場合のみ）──
+    if not os.path.exists(PARQUET_PATH):
+        print("Preparing combined parquet ...")
+        prepare_combined_parquet(DATA_DIR, PARQUET_PATH)
+
     print("Loading data ...")
+    val_sensors, val_labels, expected_matrix = load_expected_matrix(EXCEL_PATH)
+    print(f"  Validation sensors: {val_sensors}")
     df = pd.read_parquet(PARQUET_PATH)
     print(f"  Shape: {df.shape}")
 
@@ -317,30 +402,35 @@ def main():
     print(f"  Animation frames: {len(df_plot)}")
 
     # ── サブプロット構成 ──
-    # 左列 4行（温度 / RPS / EV開度 / FanSt）
-    # 右列 row1-3: P-h 線図（rowspan=3）、row4: バリデーション表
+    # 左列 5行（温度 / RPS / EV開度 / パルス / FanSt）
+    # 右列 row1-4: P-h 線図（rowspan=4）、row5: バリデーション表
+    # 軸参照: (1,1)→x/y, (1,2 rowspan)→x2/y2, (2,1)→x3/y3,
+    #         (3,1)→x4/y4, (4,1)→x5/y5, (5,1)→x6/y6, (5,2)→table
     fig = make_subplots(
-        rows=4, cols=2,
+        rows=5, cols=2,
         column_widths=[0.52, 0.48],
-        row_heights=[0.36, 0.13, 0.13, 0.38],
+        row_heights=[0.28, 0.11, 0.11, 0.25, 0.25],
         specs=[
             [{"type": "xy"},    {"rowspan": 3, "type": "xy"}],
             [{"type": "xy"},    None],
             [{"type": "xy"},    None],
-            [{"type": "xy"},    {"type": "table"}],
+            [{"type": "xy"},    {"rowspan": 2, "type": "table"}],
+            [{"type": "xy"},    None],
         ],
         subplot_titles=(
             "Temperatures", "P-h Diagram",
             "Compressor RPS", "",
             "EV Openings", "",
+            "EV パルス (目標パルス2000換算)", "",
             "Fan Status / Control", "",
         ),
-        vertical_spacing=0.05,
+        vertical_spacing=0.04,
         horizontal_spacing=0.10,
     )
 
     # ── 静的トレース: 温度（row=1） ──
-    temp_cols = ["Tdi", "Ti", "Tcg", "Tb", "Tf", "Tsh", "Tm", "Ta", "Tsc", "Ts", "Teg", "In1_TH3", "In1_TH2"]
+    temp_cols = ["Tdi", "Ti", "Tcg",  "Tf", "Tsh", "Tm", "Ta", "Tsc", "Ts", "Teg",
+                 "In1_TH3", "In1_TH2", "In2_TH3", "In2_TH2", "In3_TH3", "In3_TH2"]
     for c in temp_cols:
         if c in df.columns:
             fig.add_trace(go.Scatter(x=df.index, y=df[c],
@@ -369,13 +459,27 @@ def main():
                                      line=dict(color=ev["color"], dash=ev["dash"])),
                           row=3, col=1)
 
-    # ── 静的トレース: FanSt / 制御ﾓｰﾄﾞ / 外ｻｰﾓON中（row=4） ──
+    # ── 静的トレース: 目標パルス2000換算（row=4） ──
+    pulse_configs = [
+        {"col": "In1_目標パルス2000換算", "color": "teal",       "dash": "solid"},
+        {"col": "In2_目標パルス2000換算", "color": "darkorange", "dash": "dash"},
+        {"col": "In3_目標パルス2000換算", "color": "purple",     "dash": "dot"},
+    ]
+    for pc in pulse_configs:
+        c = pc["col"]
+        if c in df.columns:
+            fig.add_trace(go.Scatter(x=df.index, y=df[c],
+                                     name=c, mode="lines",
+                                     line=dict(color=pc["color"], dash=pc["dash"])),
+                          row=4, col=1)
+
+    # ── 静的トレース: FanSt / 制御ﾓｰﾄﾞ / 外ｻｰﾓON中（row=5） ──
     for col_name, color in [("FanSt", "purple"), ("制御ﾓｰﾄﾞ", "orange"), ("外ｻｰﾓON中", "steelblue")]:
         if col_name in df.columns:
             fig.add_trace(go.Scatter(x=df.index, y=df[col_name],
                                      name=rename_dict.get(col_name, col_name),
                                      mode="lines", line=dict(color=color)),
-                          row=4, col=1)
+                          row=5, col=1)
 
     # ── 静的トレース: PH線図背景（row=1, col=2） ──
     add_ph_background(fig, FLUID, row=1, col=2, xref=PH_XREF, yref=PH_YREF)
@@ -384,18 +488,20 @@ def main():
     fig.update_xaxes(matches="x", row=2, col=1)
     fig.update_xaxes(matches="x", row=3, col=1)
     fig.update_xaxes(matches="x", row=4, col=1)
+    fig.update_xaxes(matches="x", row=5, col=1)
 
     # 軸ラベル
     fig.update_yaxes(title_text="Temp [℃]",          row=1, col=1)
     fig.update_yaxes(title_text="Speed [rps]",        row=2, col=1)
     fig.update_yaxes(title_text="EV ratio [%/step]",  row=3, col=1)
-    fig.update_yaxes(title_text="Fan / Control",      row=4, col=1)
+    fig.update_yaxes(title_text="Pulse [step]",       row=4, col=1)
+    fig.update_yaxes(title_text="Fan / Control",      row=5, col=1)
 
     # scatter 背景のトレース数を記録
     scatter_bg_end = len(fig.data)
 
-    # ── 初期バリデーション表（row=4, col=2）──
-    fig.add_trace(make_initial_table(), row=4, col=2)
+    # ── 初期バリデーション表（row=5, col=2）──
+    fig.add_trace(make_initial_table(val_labels), row=4, col=2)
     table_trace_idx = scatter_bg_end  # テーブルトレースのインデックス
 
     bg_trace_count = len(fig.data)  # = scatter_bg_end + 1
@@ -415,9 +521,12 @@ def main():
     y2_max = df[rps_col].max() + 10 if rps_col in df.columns else 100
     ev_cols_present = [ev["col"] for ev in ev_configs if ev["col"] in df.columns]
     y3_max = df[ev_cols_present].max().max() + 0.2 if ev_cols_present else 1.5
+    pulse_cols_present = [pc["col"] for pc in pulse_configs if pc["col"] in df.columns]
+    y4_min = df[pulse_cols_present].min().min() - 5 if pulse_cols_present else 0
+    y4_max = df[pulse_cols_present].max().max() + 5 if pulse_cols_present else 2000
     fan_cols = [c for c in ["FanSt", "制御ﾓｰﾄﾞ", "外ｻｰﾓON中"] if c in df.columns]
-    y4_min = df[fan_cols].min().min() - 1 if fan_cols else 0
-    y4_max = df[fan_cols].max().max() + 1 if fan_cols else 5
+    y5_min = df[fan_cols].min().min() - 1 if fan_cols else 0
+    y5_max = df[fan_cols].max().max() + 1 if fan_cols else 5
 
     for _, row in df_plot.iterrows():
         row_dict = row.to_dict()
@@ -456,29 +565,32 @@ def main():
             showlegend=False, hoverinfo="skip",
         )
 
-        # カーソル線（左列4行）
-        cursor_temp = go.Scatter(x=[ts, ts], y=[y1_min, y1_max], mode="lines",
-                                 line=dict(color="rgba(0,0,0,0.4)", width=1, dash="dash"),
-                                 xaxis="x", yaxis="y", showlegend=False, hoverinfo="skip")
-        cursor_rps  = go.Scatter(x=[ts, ts], y=[0, y2_max], mode="lines",
-                                 line=dict(color="rgba(0,0,0,0.4)", width=1, dash="dash"),
-                                 xaxis="x3", yaxis="y3", showlegend=False, hoverinfo="skip")
-        cursor_ev   = go.Scatter(x=[ts, ts], y=[0, y3_max], mode="lines",
-                                 line=dict(color="rgba(0,0,0,0.4)", width=1, dash="dash"),
-                                 xaxis="x4", yaxis="y4", showlegend=False, hoverinfo="skip")
-        cursor_fan  = go.Scatter(x=[ts, ts], y=[y4_min, y4_max], mode="lines",
-                                 line=dict(color="rgba(0,0,0,0.4)", width=1, dash="dash"),
-                                 xaxis="x5", yaxis="y5", showlegend=False, hoverinfo="skip")
+        # カーソル線（左列5行）
+        cursor_temp  = go.Scatter(x=[ts, ts], y=[y1_min, y1_max], mode="lines",
+                                  line=dict(color="rgba(0,0,0,0.4)", width=1, dash="dash"),
+                                  xaxis="x", yaxis="y", showlegend=False, hoverinfo="skip")
+        cursor_rps   = go.Scatter(x=[ts, ts], y=[0, y2_max], mode="lines",
+                                  line=dict(color="rgba(0,0,0,0.4)", width=1, dash="dash"),
+                                  xaxis="x3", yaxis="y3", showlegend=False, hoverinfo="skip")
+        cursor_ev    = go.Scatter(x=[ts, ts], y=[0, y3_max], mode="lines",
+                                  line=dict(color="rgba(0,0,0,0.4)", width=1, dash="dash"),
+                                  xaxis="x4", yaxis="y4", showlegend=False, hoverinfo="skip")
+        cursor_pulse = go.Scatter(x=[ts, ts], y=[y4_min, y4_max], mode="lines",
+                                  line=dict(color="rgba(0,0,0,0.4)", width=1, dash="dash"),
+                                  xaxis="x5", yaxis="y5", showlegend=False, hoverinfo="skip")
+        cursor_ctrl  = go.Scatter(x=[ts, ts], y=[y5_min, y5_max], mode="lines",
+                                  line=dict(color="rgba(0,0,0,0.4)", width=1, dash="dash"),
+                                  xaxis="x6", yaxis="y6", showlegend=False, hoverinfo="skip")
 
-        moving_scatter = [cursor_temp, cursor_rps, cursor_ev, cursor_fan, info_trace] + ph_traces
+        moving_scatter = [cursor_temp, cursor_rps, cursor_ev, cursor_pulse, cursor_ctrl, info_trace] + ph_traces
         scatter_moving_len = len(moving_scatter)
 
         # バリデーション表の更新
-        col_values, col_colors = compute_table_data(row_dict)
+        col_values, col_colors = compute_table_data(row_dict, val_sensors, val_labels, expected_matrix)
         table_update = go.Table(
-            columnwidth=[2.2] + [1.0] * len(VAL_SENSORS),
+            columnwidth=[2.2] + [1.0] * len(val_sensors),
             header=dict(
-                values=[""] + VAL_LABELS,
+                values=[""] + val_labels,
                 fill_color=COLOR_HEADER,
                 font=dict(size=9, color="white"),
                 align="center", height=20,
@@ -522,12 +634,13 @@ def main():
     fig.update_layout(
         sliders=sliders,
         height=1100,
-        title_text="RXYP335FC (GAUSS連携) P-h Diagram Analysis（年月日はダミー）",
+        title_text="RXYP335FC (GAUSS連携) P-h Diagram Analysis — 2026-04-09",
         template="plotly_white",
         showlegend=True,
         hovermode="closest",
         xaxis2=dict(range=[0, 600], title="Enthalpy [kJ/kg]"),
-        yaxis2=dict(type="log", range=[np.log10(0.3), np.log10(5.0)], title="Pressure [MPa]"),
+        yaxis2=dict(type="log", range=[np.log10(0.6), np.log10(5.0)], title="Pressure [MPa]",
+                    domain=[0.58, 1.0]),
     )
 
     print(f"Saving HTML to: {OUTPUT_HTML}")
